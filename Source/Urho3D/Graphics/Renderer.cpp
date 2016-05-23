@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2008-2015 the Urho3D project.
+// Copyright (c) 2008-2016 the Urho3D project.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -180,7 +180,8 @@ static const char* geometryVSVariations[] =
     "",
     "SKINNED ",
     "INSTANCED ",
-    "BILLBOARD "
+    "BILLBOARD ",
+    "DIRBILLBOARD "
 };
 
 static const char* lightVSVariations[] =
@@ -191,6 +192,9 @@ static const char* lightVSVariations[] =
     "PERPIXEL DIRLIGHT SHADOW ",
     "PERPIXEL SPOTLIGHT SHADOW ",
     "PERPIXEL POINTLIGHT SHADOW ",
+    "PERPIXEL DIRLIGHT SHADOW NORMALOFFSET ",
+    "PERPIXEL SPOTLIGHT SHADOW NORMALOFFSET ",
+    "PERPIXEL POINTLIGHT SHADOW NORMALOFFSET "
 };
 
 static const char* vertexLightVSVariations[] =
@@ -227,7 +231,15 @@ static const char* lightPSVariations[] =
     "PERPIXEL DIRLIGHT SPECULAR SHADOW ",
     "PERPIXEL SPOTLIGHT SPECULAR SHADOW ",
     "PERPIXEL POINTLIGHT SPECULAR SHADOW ",
-    "PERPIXEL POINTLIGHT CUBEMASK SPECULAR SHADOW "
+    "PERPIXEL POINTLIGHT CUBEMASK SPECULAR SHADOW ",
+    "PERPIXEL DIRLIGHT SHADOW NORMALOFFSET ",
+    "PERPIXEL SPOTLIGHT SHADOW NORMALOFFSET ",
+    "PERPIXEL POINTLIGHT SHADOW NORMALOFFSET ",
+    "PERPIXEL POINTLIGHT CUBEMASK SHADOW NORMALOFFSET ",
+    "PERPIXEL DIRLIGHT SPECULAR SHADOW NORMALOFFSET ",
+    "PERPIXEL SPOTLIGHT SPECULAR SHADOW NORMALOFFSET ",
+    "PERPIXEL POINTLIGHT SPECULAR SHADOW NORMALOFFSET ",
+    "PERPIXEL POINTLIGHT CUBEMASK SPECULAR SHADOW NORMALOFFSET "
 };
 
 static const char* heightFogVariations[] =
@@ -250,7 +262,7 @@ Renderer::Renderer(Context* context) :
     materialQuality_(QUALITY_HIGH),
     shadowMapSize_(1024),
     shadowQuality_(SHADOWQUALITY_PCF_16BIT),
-    shadowSoftness_(2.0f),
+    shadowSoftness_(1.0f),
     vsmShadowParams_(0.0000001f, 0.2f),
     maxShadowMaps_(1),
     minInstances_(2),
@@ -260,6 +272,7 @@ Renderer::Renderer(Context* context) :
     occluderSizeThreshold_(0.025f),
     mobileShadowBiasMul_(2.0f),
     mobileShadowBiasAdd_(0.0001f),
+    mobileNormalOffsetMul_(2.0f),
     numOcclusionBuffers_(0),
     numShadowCameras_(0),
     shadersChangedFrameNumber_(M_MAX_UNSIGNED),
@@ -307,6 +320,11 @@ void Renderer::SetDefaultRenderPath(XMLFile* xmlFile)
     SharedPtr<RenderPath> newRenderPath(new RenderPath());
     if (newRenderPath->Load(xmlFile))
         defaultRenderPath_ = newRenderPath;
+}
+
+void Renderer::SetDefaultTechnique(Technique* technique)
+{
+    defaultTechnique_ = technique;
 }
 
 void Renderer::SetHDRRendering(bool enable)
@@ -486,6 +504,11 @@ void Renderer::SetMobileShadowBiasAdd(float add)
     mobileShadowBiasAdd_ = add;
 }
 
+void Renderer::SetMobileNormalOffsetMul(float mul)
+{
+    mobileNormalOffsetMul_ = mul;
+}
+
 void Renderer::SetOccluderSizeThreshold(float screenSize)
 {
     occluderSizeThreshold_ = Max(screenSize, 0.0f);
@@ -505,10 +528,10 @@ void Renderer::ReloadShaders()
     shadersDirty_ = true;
 }
 
-void Renderer::ApplyShadowMapFilter(View* view, Texture2D* shadowMap)
+void Renderer::ApplyShadowMapFilter(View* view, Texture2D* shadowMap, float blurScale)
 {
     if (shadowMapFilterInstance_ && shadowMapFilter_)
-        (shadowMapFilterInstance_->*shadowMapFilter_)(view, shadowMap);
+        (shadowMapFilterInstance_->*shadowMapFilter_)(view, shadowMap, blurScale);
 }
 
 Viewport* Renderer::GetViewport(unsigned index) const
@@ -519,6 +542,15 @@ Viewport* Renderer::GetViewport(unsigned index) const
 RenderPath* Renderer::GetDefaultRenderPath() const
 {
     return defaultRenderPath_;
+}
+
+Technique* Renderer::GetDefaultTechnique() const
+{
+    // Assign default when first asked if not assigned yet
+    if (!defaultTechnique_)
+        const_cast<SharedPtr<Technique>& >(defaultTechnique_) = GetSubsystem<ResourceCache>()->GetResource<Technique>("Techniques/NoTexture.xml");
+
+    return defaultTechnique_;
 }
 
 unsigned Renderer::GetNumGeometries(bool allViews) const
@@ -624,68 +656,17 @@ void Renderer::Update(float timeStep)
     for (unsigned i = viewports_.Size() - 1; i < viewports_.Size(); --i)
         QueueViewport(0, viewports_[i]);
 
-    // Gather other render surfaces that are autoupdated
+    // Update main viewports. This may queue further views
+    unsigned numMainViewports = queuedViewports_.Size();
+    for (unsigned i = 0; i < numMainViewports; ++i)
+        UpdateQueuedViewport(i);
+
+    // Gather queued & autoupdated render surfaces
     SendEvent(E_RENDERSURFACEUPDATE);
 
-    // Process gathered views. This may queue further views (render surfaces that are only updated when visible)
-    for (unsigned i = 0; i < queuedViewports_.Size(); ++i)
-    {
-        WeakPtr<RenderSurface>& renderTarget = queuedViewports_[i].first_;
-        WeakPtr<Viewport>& viewport = queuedViewports_[i].second_;
-
-        // Null pointer means backbuffer view. Differentiate between that and an expired rendersurface
-        if ((renderTarget.NotNull() && renderTarget.Expired()) || viewport.Expired())
-            continue;
-
-        // (Re)allocate the view structure if necessary
-        if (!viewport->GetView() || resetViews_)
-            viewport->AllocateView();
-
-        View* view = viewport->GetView();
-        assert(view);
-        // Check if view can be defined successfully (has either valid scene, camera and octree, or no scene passes)
-        if (!view->Define(renderTarget, viewport))
-            continue;
-
-        views_.Push(WeakPtr<View>(view));
-
-        const IntRect& viewRect = viewport->GetRect();
-        Scene* scene = viewport->GetScene();
-        if (!scene)
-            continue;
-
-        Octree* octree = scene->GetComponent<Octree>();
-
-        // Update octree (perform early update for drawables which need that, and reinsert moved drawables.)
-        // However, if the same scene is viewed from multiple cameras, update the octree only once
-        if (!updatedOctrees_.Contains(octree))
-        {
-            frame_.camera_ = viewport->GetCamera();
-            frame_.viewSize_ = viewRect.Size();
-            if (frame_.viewSize_ == IntVector2::ZERO)
-                frame_.viewSize_ = IntVector2(graphics_->GetWidth(), graphics_->GetHeight());
-            octree->Update(frame_);
-            updatedOctrees_.Insert(octree);
-
-            // Set also the view for the debug renderer already here, so that it can use culling
-            /// \todo May result in incorrect debug geometry culling if the same scene is drawn from multiple viewports
-            DebugRenderer* debug = scene->GetComponent<DebugRenderer>();
-            if (debug)
-                debug->SetView(viewport->GetCamera());
-        }
-
-        // Update view. This may queue further views. View will send update begin/end events once its state is set
-        ResetShadowMapAllocations(); // Each view can reuse the same shadow maps
-        view->Update(frame_);
-    }
-
-    // Reset update flag from queued render surfaces. At this point no new views can be added on this frame
-    for (unsigned i = 0; i < queuedViewports_.Size(); ++i)
-    {
-        WeakPtr<RenderSurface>& renderTarget = queuedViewports_[i].first_;
-        if (renderTarget)
-            renderTarget->WasUpdated();
-    }
+    // Update viewports that were added as result of the event above
+    for (unsigned i = numMainViewports; i < queuedViewports_.Size(); ++i)
+        UpdateQueuedViewport(i);
 
     queuedViewports_.Clear();
     resetViews_ = false;
@@ -813,8 +794,12 @@ void Renderer::QueueViewport(RenderSurface* renderTarget, Viewport* viewport)
 {
     if (viewport)
     {
-        queuedViewports_.Push(Pair<WeakPtr<RenderSurface>, WeakPtr<Viewport> >(WeakPtr<RenderSurface>(renderTarget),
-            WeakPtr<Viewport>(viewport)));
+        Pair<WeakPtr<RenderSurface>, WeakPtr<Viewport> > newView = 
+            MakePair(WeakPtr<RenderSurface>(renderTarget), WeakPtr<Viewport>(viewport));
+
+        // Prevent double add of the same rendertarget/viewport combination
+        if (!queuedViewports_.Contains(newView))
+            queuedViewports_.Push(newView);
     }
 }
 
@@ -1049,14 +1034,14 @@ Texture* Renderer::GetScreenBuffer(int width, int height, unsigned format, bool 
             }
 #endif
 
-            newBuffer = StaticCast<Texture>(newTex2D);
+            newBuffer = newTex2D;
         }
         else
         {
             SharedPtr<TextureCube> newTexCube(new TextureCube(context_));
             newTexCube->SetSize(width, format, TEXTURE_RENDERTARGET);
 
-            newBuffer = StaticCast<Texture>(newTexCube);
+            newBuffer = newTexCube;
         }
 
         newBuffer->SetSRGB(srgb);
@@ -1194,7 +1179,10 @@ void Renderer::SetBatchShaders(Batch& batch, Technique* tech, bool allowShadows)
                 psi += LPS_SPEC;
             if (allowShadows && lightQueue->shadowMap_)
             {
-                vsi += LVS_SHADOW;
+                if (light->GetShadowBias().normalOffset_ > 0.0f)
+                    vsi += LVS_SHADOWNORMALOFFSET;
+                else
+                    vsi += LVS_SHADOW;
                 psi += LPS_SHADOW;
             }
 
@@ -1285,7 +1273,12 @@ void Renderer::SetLightVolumeBatchShaders(Batch& batch, Camera* camera, const St
     }
 
     if (batch.lightQueue_->shadowMap_)
-        psi += DLPS_SHADOW;
+    {
+        if (light->GetShadowBias().normalOffset_ > 0.0)
+            psi += DLPS_SHADOWNORMALOFFSET;
+        else
+            psi += DLPS_SHADOW;
+    }
 
     if (specularLighting_ && light->GetSpecularIntensity() > 0.0f)
         psi += DLPS_SPEC;
@@ -1418,6 +1411,8 @@ void Renderer::OptimizeLightByStencil(Light* light, Camera* camera)
         graphics_->SetDepthWrite(false);
         graphics_->SetStencilTest(true, CMP_ALWAYS, OP_REF, OP_KEEP, OP_KEEP, lightStencilValue_);
         graphics_->SetShaders(graphics_->GetShader(VS, "Stencil"), graphics_->GetShader(PS, "Stencil"));
+        graphics_->SetShaderParameter(VSP_VIEW, view);
+        graphics_->SetShaderParameter(VSP_VIEWINV, camera->GetEffectiveWorldTransform());
         graphics_->SetShaderParameter(VSP_VIEWPROJ, projection * view);
         graphics_->SetShaderParameter(VSP_MODEL, light->GetVolumeTransform(camera));
 
@@ -1456,6 +1451,57 @@ const Rect& Renderer::GetLightScissor(Light* light, Camera* camera)
         BoundingBox viewBox(light->GetWorldBoundingBox().Transformed(view));
         return lightScissorCache_[combination] = viewBox.Projected(projection);
     }
+}
+
+void Renderer::UpdateQueuedViewport(unsigned index)
+{
+    WeakPtr<RenderSurface>& renderTarget = queuedViewports_[index].first_;
+    WeakPtr<Viewport>& viewport = queuedViewports_[index].second_;
+
+    // Null pointer means backbuffer view. Differentiate between that and an expired rendersurface
+    if ((renderTarget.NotNull() && renderTarget.Expired()) || viewport.Expired())
+        return;
+
+    // (Re)allocate the view structure if necessary
+    if (!viewport->GetView() || resetViews_)
+        viewport->AllocateView();
+
+    View* view = viewport->GetView();
+    assert(view);
+    // Check if view can be defined successfully (has either valid scene, camera and octree, or no scene passes)
+    if (!view->Define(renderTarget, viewport))
+        return;
+
+    views_.Push(WeakPtr<View>(view));
+
+    const IntRect& viewRect = viewport->GetRect();
+    Scene* scene = viewport->GetScene();
+    if (!scene)
+        return;
+
+    Octree* octree = scene->GetComponent<Octree>();
+
+    // Update octree (perform early update for drawables which need that, and reinsert moved drawables.)
+    // However, if the same scene is viewed from multiple cameras, update the octree only once
+    if (!updatedOctrees_.Contains(octree))
+    {
+        frame_.camera_ = viewport->GetCamera();
+        frame_.viewSize_ = viewRect.Size();
+        if (frame_.viewSize_ == IntVector2::ZERO)
+            frame_.viewSize_ = IntVector2(graphics_->GetWidth(), graphics_->GetHeight());
+        octree->Update(frame_);
+        updatedOctrees_.Insert(octree);
+
+        // Set also the view for the debug renderer already here, so that it can use culling
+        /// \todo May result in incorrect debug geometry culling if the same scene is drawn from multiple viewports
+        DebugRenderer* debug = scene->GetComponent<DebugRenderer>();
+        if (debug && viewport->GetDrawDebug())
+            debug->SetView(viewport->GetCamera());
+    }
+
+    // Update view. This may queue further views. View will send update begin/end events once its state is set
+    ResetShadowMapAllocations(); // Each view can reuse the same shadow maps
+    view->Update(frame_);
 }
 
 void Renderer::PrepareViewRender()
@@ -1563,9 +1609,9 @@ void Renderer::LoadShaders()
     for (unsigned i = 0; i < MAX_DEFERRED_LIGHT_PS_VARIATIONS; ++i)
     {
         deferredLightPSVariations_[i] = lightPSVariations[i % DLPS_ORTHO];
-        if (i & DLPS_SHADOW)
+        if ((i % DLPS_ORTHO) >= DLPS_SHADOW)
             deferredLightPSVariations_[i] += GetShadowVariations();
-        if (i & DLPS_ORTHO)
+        if (i >= DLPS_ORTHO)
             deferredLightPSVariations_[i] += "ORTHO ";
     }
 
@@ -1875,7 +1921,7 @@ void Renderer::HandleRenderUpdate(StringHash eventType, VariantMap& eventData)
 }
 
 
-void Renderer::BlurShadowMap(View* view, Texture2D* shadowMap)
+void Renderer::BlurShadowMap(View* view, Texture2D* shadowMap, float blurScale)
 {
     graphics_->SetBlendMode(BLEND_REPLACE);
     graphics_->SetDepthTest(CMP_ALWAYS);
@@ -1898,18 +1944,17 @@ void Renderer::BlurShadowMap(View* view, Texture2D* shadowMap)
 
     // Horizontal blur of the shadow map
     static const StringHash blurOffsetParam("BlurOffsets");
-    graphics_->SetShaderParameter(blurOffsetParam, Vector2(shadowSoftness_ / shadowMap->GetWidth(), 0.0f));
 
+    graphics_->SetShaderParameter(blurOffsetParam, Vector2(shadowSoftness_ * blurScale / shadowMap->GetWidth(), 0.0f));
     graphics_->SetTexture(TU_DIFFUSE, shadowMap);
-    view->DrawFullscreenQuad(false);
+    view->DrawFullscreenQuad(true);
 
     // Vertical blur
     graphics_->SetRenderTarget(0, shadowMap);
     graphics_->SetViewport(IntRect(0, 0, shadowMap->GetWidth(), shadowMap->GetHeight()));
-
-    graphics_->SetShaderParameter(blurOffsetParam, Vector2(0.0f, shadowSoftness_ / shadowMap->GetHeight()));
+    graphics_->SetShaderParameter(blurOffsetParam, Vector2(0.0f, shadowSoftness_ * blurScale / shadowMap->GetHeight()));
 
     graphics_->SetTexture(TU_DIFFUSE, tmpBuffer);
-    view->DrawFullscreenQuad(false);
+    view->DrawFullscreenQuad(true);
 }
 }

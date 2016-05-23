@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2008-2015 the Urho3D project.
+// Copyright (c) 2008-2016 the Urho3D project.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -84,6 +84,7 @@ void Urho3DPlayer::Setup()
             "-t           Enable triple buffering\n"
             "-w           Start in windowed mode\n"
             "-s           Enable resizing when in windowed mode\n"
+            "-hd          Enable high DPI, only supported by Apple platforms (OSX, iOS, and tvOS)\n"
             "-q           Enable quiet mode which does not log to standard output stream\n"
             "-b <length>  Sound buffer length in milliseconds\n"
             "-r <freq>    Sound mixing frequency in Hz\n"

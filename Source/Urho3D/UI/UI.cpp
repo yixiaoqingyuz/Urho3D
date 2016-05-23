@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2008-2015 the Urho3D project.
+// Copyright (c) 2008-2016 the Urho3D project.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -1370,6 +1370,18 @@ void UI::SendClickEvent(StringHash eventType, UIElement* beginElement, UIElement
     if (eventType == E_UIMOUSECLICKEND)
         eventData[UIMouseClickEnd::P_BEGINELEMENT] = beginElement;
 
+    if (endElement)
+    {
+        // Send also element version of the event
+        if (eventType == E_UIMOUSECLICK)
+            endElement->SendEvent(E_CLICK, eventData);
+        else if (eventType == E_UIMOUSECLICKEND)
+            endElement->SendEvent(E_CLICKEND, eventData);
+        else if (eventType == E_UIMOUSEDOUBLECLICK)
+            endElement->SendEvent(E_DOUBLECLICK, eventData);
+    }
+
+    // Send the global event from the UI subsystem last
     SendEvent(eventType, eventData);
 }
 
@@ -1438,9 +1450,11 @@ void UI::HandleMouseMove(StringHash eventType, VariantMap& eventData)
     {
         if (!input->IsMouseVisible())
         {
-            // Relative mouse motion: move cursor only when visible
-            if (cursor_->IsVisible())
+            if (!input->IsMouseLocked())
+                cursor_->SetPosition(IntVector2(eventData[P_X].GetInt(), eventData[P_Y].GetInt()));
+            else if (cursor_->IsVisible())
             {
+                // Relative mouse motion: move cursor only when visible
                 IntVector2 pos = cursor_->GetPosition();
                 pos.x_ += eventData[P_DX].GetInt();
                 pos.y_ += eventData[P_DY].GetInt();

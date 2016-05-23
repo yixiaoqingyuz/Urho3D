@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2008-2015 the Urho3D project.
+// Copyright (c) 2008-2016 the Urho3D project.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -53,7 +53,6 @@ extern const char* UI_CATEGORY;
 
 Text::Text(Context* context) :
     UIElement(context),
-    usedInText3D_(false),
     fontSize_(DEFAULT_FONT_SIZE),
     textAlignment_(HA_LEFT),
     rowSpacing_(1.0f),
@@ -371,11 +370,6 @@ void Text::SetEffectColor(const Color& effectColor)
     effectColor_ = effectColor;
 }
 
-void Text::SetUsedInText3D(bool usedInText3D)
-{
-    usedInText3D_ = usedInText3D;
-}
-
 void Text::SetEffectDepthBias(float bias)
 {
     effectDepthBias_ = bias;
@@ -531,7 +525,7 @@ void Text::UpdateText(bool onResize)
                             printToText_.Pop();
                         }
                         printText_.Push('\n');
-                        printToText_.Push((unsigned)Min((int)i, (int)unicodeText_.Size() - 1));
+                        printToText_.Push(Min(i, unicodeText_.Size() - 1));
                         rowWidth = 0;
                         nextBreak = lineStart = i;
                     }
@@ -557,7 +551,7 @@ void Text::UpdateText(bool onResize)
                 else
                 {
                     printText_.Push('\n');
-                    printToText_.Push((unsigned)Min((int)i, (int)unicodeText_.Size() - 1));
+                    printToText_.Push(Min(i, unicodeText_.Size() - 1));
                     rowWidth = 0;
                     nextBreak = lineStart = i;
                 }

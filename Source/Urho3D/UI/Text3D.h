@@ -1,5 +1,5 @@
 //
-// Copyright (c) 2008-2015 the Urho3D project.
+// Copyright (c) 2008-2016 the Urho3D project.
 //
 // Permission is hereby granted, free of charge, to any person obtaining a copy
 // of this software and associated documentation files (the "Software"), to deal
@@ -154,15 +154,13 @@ protected:
     virtual void OnNodeSet(Node* node);
     /// Recalculate the world-space bounding box.
     virtual void OnWorldBoundingBoxUpdate();
-
-private:
     /// Mark text & geometry dirty.
     void MarkTextDirty();
     /// Update text %UI batches.
     void UpdateTextBatches();
     /// Create materials for text rendering. May only be called from the main thread. Text %UI batches must be up-to-date.
     void UpdateTextMaterials(bool forceUpdate = false);
-
+    
     /// Internally used text element.
     Text text_;
     /// Geometries.
